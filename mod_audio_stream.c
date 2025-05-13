@@ -10,6 +10,13 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load);
 
 SWITCH_MODULE_DEFINITION(mod_audio_stream, mod_audio_stream_load, mod_audio_stream_shutdown, NULL /*mod_audio_stream_runtime*/);
 
+#define SWITCH_AUTIOSTREAM_TERMINATORS_VARIABLE "audio_stream_terminators"
+#define SWITCH_AUTIOSTREAM_TERMINATOR_USED "audio_stream_terminator_used"
+#define SWITCH_AUTIOSTREAM_TTS_FILE "audio_stream_tts_file"
+#define SWITCH_AUTIOSTREAM_WAIT_RESULT "audio_stream_wait_result"
+#define SWITCH_AUTIOSTREAM_WAIT_CAUSE "audio_stream_wait_cause"
+
+
 static void responseHandler(switch_core_session_t* session, const char* eventName, const char* json) {
     switch_event_t *event;
     switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -135,6 +142,154 @@ static switch_status_t send_text(switch_core_session_t *session, char* text) {
     return status;
 }
 
+static switch_status_t on_autio_stream_dtmf(switch_core_session_t *session, void *input, switch_input_type_t itype, void *buf, unsigned int buflen)
+{
+	char sbuf[3];
+
+	switch (itype) {
+	case SWITCH_INPUT_TYPE_DTMF:
+		{
+			switch_dtmf_t *dtmf = (switch_dtmf_t *) input;
+			const char *terminators;
+			switch_channel_t *channel = switch_core_session_get_channel(session);
+			const char *p;
+
+			if (!(terminators = switch_channel_get_variable(channel, SWITCH_AUTIOSTREAM_TERMINATORS_VARIABLE))) {
+				//terminators = "*";
+				terminators = NULL;
+			}
+			if (!strcasecmp(terminators, "any")) {
+				terminators = "1234567890*#";
+			}
+			if (!strcasecmp(terminators, "none")) {
+				terminators = NULL;
+			}
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Digit %c\n", dtmf->digit);
+
+			if (switch_true(switch_channel_get_variable(channel, "audio_stream_send_digits"))) {
+				switch_snprintf(sbuf, sizeof(sbuf), "%c", dtmf->digit);
+				send_text(session, sbuf);
+			}
+			
+			for (p = terminators; p && *p; p++) {
+				if (*p == dtmf->digit) {
+					switch_snprintf(sbuf, sizeof(sbuf), "%c", *p);
+					switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_TERMINATOR_USED, sbuf);
+					return SWITCH_STATUS_BREAK;
+				}
+			}
+		}
+		break;
+	case SWITCH_INPUT_TYPE_EVENT:
+		{
+			switch_channel_t *channel = switch_core_session_get_channel(session);
+			switch_event_t *event = (switch_event_t *) input;
+			if (!strcmp(EVENT_PLAY, event->subclass_name)) {
+				char *event_body =  switch_event_get_body(event);
+				if (!zstr(event_body)) {
+					cJSON* json = cJSON_Parse(event_body);
+					if (json) {
+						const char* tts_file = cJSON_GetObjectCstr(json, "file");
+						if (!zstr(tts_file)) {
+							switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_TTS_FILE, tts_file);
+							cJSON_Delete(json);
+							return SWITCH_STATUS_BREAK;
+						}
+						cJSON_Delete(json);
+					}
+				}
+			}
+			else if (!strcmp(EVENT_ERROR, event->subclass_name)) {
+				switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_RESULT, "stop");
+				return SWITCH_STATUS_BREAK;
+			}
+		}
+		break;
+	default:
+		break;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+#define PLAY_AND_WAIT_AUDIO_STREAM_SYNTAX "<timeout> [<file>]"
+SWITCH_STANDARD_APP(play_and_wait_audio_stream_function)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	int argc = 0;
+	char *argv[2];
+	char *lbuf = NULL;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+	char buf[10];
+	switch_input_args_t args = { 0 };
+
+	if (NULL == switch_channel_get_private(channel, MY_BUG_NAME)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: bug is not attached!, use uuid_audio_stream API start first\n");
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_CAUSE, "003");
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_RESULT, "NO START");
+		return;
+	}
+
+	if (zstr(data) || !(lbuf = switch_core_session_strdup(session, data))) {
+		/* bad input */
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Usage: %s\n", PLAY_AND_WAIT_AUDIO_STREAM_SYNTAX);
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_CAUSE, "004");
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_RESULT, "NO PARAMS");
+		return;
+	}
+
+	switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_TTS_FILE, "");
+	switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_TERMINATOR_USED, "");
+	switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_RESULT, "");
+
+	args.input_callback = on_autio_stream_dtmf;
+	args.buf = buf;
+	args.buflen = sizeof(buf);
+
+	argc = switch_separate_string(lbuf, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+	if (argc < 2 || zstr(argv[1])) {
+		uint32_t ms = atoi(argv[0]);
+		status = switch_ivr_sleep(session, ms, SWITCH_TRUE, &args);
+	}
+	else {
+		switch_file_handle_t fh = { 0 };
+		char *p;
+		const char *file = NULL;
+		if (argv[1]) {
+			file = switch_core_session_strdup(session, argv[1]);
+			if ((p = strchr(file, '@')) && *(p + 1) == '@') {
+				*p = '\0';
+				p += 2;
+				if (*p) {
+					fh.samples = atoi(p);
+				}
+			}
+		} else {
+			file = argv[1];
+		}
+
+		status = switch_ivr_play_file(session, &fh, file, &args);
+		switch_assert(!(fh.flags & SWITCH_FILE_OPEN));
+	}
+
+	switch (status) {
+	case SWITCH_STATUS_SUCCESS:
+	case SWITCH_STATUS_BREAK:
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_CAUSE, "000");
+		break;
+	case SWITCH_STATUS_NOTFOUND:
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_CAUSE, "001");
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_RESULT, "FILE NOT FOUND");
+		break;
+	default:
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_CAUSE, "002");
+		switch_channel_set_variable(channel, SWITCH_AUTIOSTREAM_WAIT_RESULT, "GET REUSLT ERROR");
+		break;
+	}
+}
+
+
 #define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000] [metadata]"
 SWITCH_STANDARD_API(stream_function)
 {
@@ -196,6 +351,8 @@ SWITCH_STANDARD_API(stream_function)
                 }
                 if (0 == strcmp(argv[3], "mixed")) {
                     flags |= SMBF_WRITE_STREAM;
+		} else if (0 == strcmp(argv[3], "read")) {
+                    flags |= SMBF_READ_STREAM;
                 } else if (0 == strcmp(argv[3], "stereo")) {
                     flags |= SMBF_WRITE_STREAM;
                     flags |= SMBF_STEREO;
@@ -248,6 +405,7 @@ done:
 SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
 {
     switch_api_interface_t *api_interface;
+    switch_application_interface_t *app_interface;
 
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_stream API loading..\n");
 
@@ -270,6 +428,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
     switch_console_set_complete("add uuid_audio_stream ::console::list_uuid resume");
     switch_console_set_complete("add uuid_audio_stream ::console::list_uuid send_text");
 
+    SWITCH_ADD_APP(app_interface, "play_and_wait_audio_stream", "Play and wait asr result", "Play and wait asr recognition", play_and_wait_audio_stream_function, PLAY_AND_WAIT_AUDIO_STREAM_SYNTAX, SAF_NONE);
+
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_stream API successfully loaded\n");
 
     /* indicate that the module should continue to be loaded */
@@ -285,6 +445,8 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
     switch_event_free_subclass(EVENT_CONNECT);
     switch_event_free_subclass(EVENT_DISCONNECT);
     switch_event_free_subclass(EVENT_ERROR);
+
+    switch_console_set_complete("del uuid_audio_stream");
 
     return SWITCH_STATUS_SUCCESS;
 }
