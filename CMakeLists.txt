@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.13)
 project(mod_audio_stream
         VERSION 1.0.0
         DESCRIPTION "Audio streaming module for FreeSWITCH."
@@ -12,7 +12,7 @@ set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g")
 
 option(ENABLE_LOCAL "Enable local compile/debug specific" OFF)
 if(ENABLE_LOCAL)
-    set(ENV{PKG_CONFIG_PATH} "/usr/local/freeswitch/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    set(ENV{PKG_CONFIG_PATH} "/usr/local/justswitch/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
 endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -20,9 +20,10 @@ find_package(PkgConfig REQUIRED)
 find_package(SpeexDSP REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(FMT REQUIRED)
 
-pkg_check_modules(FreeSWITCH REQUIRED IMPORTED_TARGET freeswitch)
-pkg_get_variable(FS_MOD_DIR freeswitch modulesdir)
+pkg_check_modules(FreeSWITCH REQUIRED IMPORTED_TARGET justswitch)
+pkg_get_variable(FS_MOD_DIR justswitch modulesdir)
 message(STATUS "FreeSWITCH modules dir: ${FS_MOD_DIR}")
 
 #set(USE_TLS ON CACHE BOOL "Use TLS for secure WebSocket connections" FORCE)
@@ -44,7 +45,7 @@ target_link_libraries(mod_audio_stream PRIVATE PkgConfig::FreeSWITCH pthread)
 target_link_libraries (mod_audio_stream PRIVATE ixwebsocket)
 
 set(CPACK_COMPONENTS_ALL ${PROJECT_NAME} changelog.gz copyright)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libspeexdsp1, openssl, zlib1g, libfreeswitch1")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libspeexdsp1, openssl, zlib1g, libjustswitch1")
 set(CPACK_PACKAGE_NAME "mod-audio-stream")
 set(CMAKE_INSTALL_DOCDIR "share/doc/${CPACK_PACKAGE_NAME}")
 
