@@ -2,6 +2,7 @@
 #include <cstring>
 #include "mod_audio_stream.h"
 #include <ixwebsocket/IXWebSocket.h>
+#include <fmt/core.h>
 
 #include <switch_json.h>
 #include <fstream>
@@ -622,8 +623,16 @@ extern "C" {
         return SWITCH_STATUS_SUCCESS;
     }
 
+	static void write_frame_text(AudioStreamer *pAudioStreamer, int sampling, uint8_t* buffer, size_t len) {
+		std::string sbuf = fmt::format("{{\"type\":\"streamAudio\",\"data\":{{\"audioDataType\":\"raw\",\"sampleRate\": {},\"audioData\":\"{}\"}}}}",
+					    sampling, 
+					    base64_encode((const unsigned char*)buffer, len, true));
+		pAudioStreamer->writeText(sbuf.c_str());
+	}
+
     switch_bool_t stream_frame(switch_media_bug_t *bug)
     {
+        switch_channel_t *channel = switch_core_session_get_channel(switch_core_media_bug_get_session(bug));
         auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt || tech_pvt->audio_paused) return SWITCH_TRUE;
 
@@ -650,7 +659,13 @@ extern "C" {
                 while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
                     if(frame.datalen) {
                         if (1 == tech_pvt->rtp_packets) {
-                            pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
+                            if (switch_channel_var_true(channel, "STREAM_FRAME_USE_TEXT")) {
+                                write_frame_text(pAudioStreamer,tech_pvt->sampling,(uint8_t *) frame.data, frame.datalen);
+                            }
+                            else {
+                                pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
+                            }
+
                             continue;
                         }
 
@@ -674,8 +689,12 @@ extern "C" {
                                 memcpy(&chunkPtr[nBytes - remaining], static_cast<uint8_t *>(frame.data) + frame.datalen - remaining, remaining);
                             }
 
-                            pAudioStreamer->writeBinary(chunkPtr, nBytes);
-
+                            if (switch_channel_var_true(channel, "STREAM_FRAME_USE_TEXT")) {
+                                write_frame_text(pAudioStreamer,tech_pvt->sampling,chunkPtr, nBytes);
+                            }
+                            else {
+                                pAudioStreamer->writeBinary(chunkPtr, nBytes);
+                            }
                             ringBufferClear(tech_pvt->buffer);
                         }
 
@@ -712,7 +731,12 @@ extern "C" {
                         if(out_len > 0) {
                             const size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
                             if (tech_pvt->rtp_packets == 1) { //20ms packet
-                                pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
+                                if (switch_channel_var_true(channel, "STREAM_FRAME_USE_TEXT")) {
+                                    write_frame_text(pAudioStreamer,tech_pvt->sampling,(uint8_t *) out, bytes_written);
+                                }
+                                else {
+                                    pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
+                                }
                                 continue;
                             }
                             if (bytes_written <= available) {
@@ -725,7 +749,12 @@ extern "C" {
                             uint8_t buf_ptr[buf_len];
                             switch_buffer_read(tech_pvt->sbuffer, buf_ptr, buf_len);
                             switch_buffer_zero(tech_pvt->sbuffer);
-                            pAudioStreamer->writeBinary(buf_ptr, buf_len);
+                            if (switch_channel_var_true(channel, "STREAM_FRAME_USE_TEXT")) {
+                                write_frame_text(pAudioStreamer,tech_pvt->sampling,buf_ptr, buf_len);
+                            }
+                            else {
+                                pAudioStreamer->writeBinary(buf_ptr, buf_len);
+                            }
                         }
                     }
                 }
